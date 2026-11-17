@@ -97,7 +97,7 @@ export function calculate(p:Params,pipes:Pipe[]):Result & {iterations:Iteration[
  for(const trial of all.filter(x=>x.burst<burstRequired&&x.table.length>=2&&x.collapse<parts[0].pipe.collapse)){
   const upper=parts[0],fixedBelow=parts.slice(1).reduce((sum,x)=>sum+(x.end-x.start)*x.pipe.weight,0);
   let h=Math.min(upper.end,trial.collapse/(p.collapseDF*gradient));
-  const label=[trial,...parts.map(x=>x.pipe)].map(x=>x.grade+' '+x.weight).join(' → ');
+  const label='REJECTED — Burst FAIL | '+[trial,...parts.map(x=>x.pipe)].map(x=>x.grade+' '+x.weight).join(' → ');
   const rows:Iteration[]=[];let reason='Burst FAIL: '+trial.burst+' psi < '+burstRequired.toFixed(0)+' psi';
   for(let i=0;i<100;i++){
    const weightBelow=fixedBelow+(upper.end-h)*upper.pipe.weight;
