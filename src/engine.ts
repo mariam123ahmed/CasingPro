@@ -66,8 +66,9 @@ export function calculate(p:Params,pipes:Pipe[]):Result & {iterations:Iteration[
     const s=parts[j];
     const below=parts.slice(j+1).reduce((sum,x)=>sum+(x.end-x.start)*x.pipe.weight,0);
     const load=below+(s.end-s.start)*s.pipe.weight;
-    const rating=interpolate(s.pipe.table,load/s.pipe.area);
-    if(rating===null||rating+1e-7<gradient*s.end*p.collapseDF){reason='Collapse check failed at '+s.end.toFixed(1)+' ft for '+s.pipe.grade+' '+s.pipe.weight;break}
+    const ratingTop=interpolate(s.pipe.table,load/s.pipe.area);
+    const ratingBottom=interpolate(s.pipe.table,below/s.pipe.area);
+    if(ratingTop===null||ratingBottom===null||ratingTop+1e-7<gradient*s.start*p.collapseDF||ratingBottom+1e-7<gradient*s.end*p.collapseDF){reason='Collapse check failed at '+s.end.toFixed(1)+' ft for '+s.pipe.grade+' '+s.pipe.weight;break}
    }
   }
   const weight=parts.reduce((s,x)=>s+(x.end-x.start)*x.pipe.weight,0);
@@ -81,11 +82,11 @@ export function calculate(p:Params,pipes:Pipe[]):Result & {iterations:Iteration[
  const segments:Segment[]=parts.map((part,j)=>{
   const below=parts.slice(j+1).reduce((s,x)=>s+(x.end-x.start)*x.pipe.weight,0);
   const load=below+(part.end-part.start)*part.pipe.weight,stress=load/part.pipe.area;
-  const rating=interpolate(part.pipe.table,stress)!;
+  const rating=interpolate(part.pipe.table,below/part.pipe.area)!;
   const strength=part.pipe.body!==null&&part.pipe.joint!==null?Math.min(part.pipe.body,part.pipe.joint):null;
   return {...part,weight:(part.end-part.start)*part.pipe.weight,cost:part.pipe.price===null?null:(part.end-part.start)*part.pipe.price,topLoad:load,topStress:stress,minCollapseSF:rating/(gradient*part.end),minTensionSF:strength===null?NaN:strength/load};
  });
- const trace:Trace[]=segments.map(s=>({depth:s.end,grade:s.pipe.grade,weight:s.pipe.weight,load:s.topLoad,stress:s.topStress,rating:interpolate(s.pipe.table,s.topStress)!,required:gradient*s.end*p.collapseDF,factor:s.minCollapseSF,status:'PASS (collapse)'}));
+ const trace:Trace[]=segments.map(s=>({depth:s.end,grade:s.pipe.grade,weight:s.pipe.weight,load:s.topLoad,stress:s.topStress,rating:interpolate(s.pipe.table,(s.topLoad-s.weight)/s.pipe.area)!,required:gradient*s.end*p.collapseDF,factor:s.minCollapseSF,status:'PASS (collapse)'}));
  const missing=segments.filter(s=>!Number.isFinite(s.minTensionSF));
  const failed=segments.filter(s=>Number.isFinite(s.minTensionSF)&&s.minTensionSF<p.tensionDF);
  if(missing.length)warnings.push('Collapse design calculated; tension NOT VERIFIED: missing body/joint strength for '+missing.map(s=>s.pipe.grade+' '+s.pipe.weight).join(', '));
