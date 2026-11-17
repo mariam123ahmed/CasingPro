@@ -68,7 +68,7 @@ export function calculate(p:Params,pipes:Pipe[]):Result & {iterations:Iteration[
     const load=below+(s.end-s.start)*s.pipe.weight;
     const ratingTop=interpolate(s.pipe.table,load/s.pipe.area);
     const ratingBottom=interpolate(s.pipe.table,below/s.pipe.area);
-    if(ratingTop===null||ratingBottom===null||ratingTop+1e-7<gradient*s.start*p.collapseDF||ratingBottom+1e-7<gradient*s.end*p.collapseDF){reason='Collapse check failed at '+s.end.toFixed(1)+' ft for '+s.pipe.grade+' '+s.pipe.weight;break}
+    if(ratingTop===null||ratingBottom===null||ratingTop+gradient*p.collapseDF*tol+1e-7<gradient*s.start*p.collapseDF||ratingBottom+gradient*p.collapseDF*tol+1e-7<gradient*s.end*p.collapseDF){reason='Collapse check failed at '+s.end.toFixed(1)+' ft for '+s.pipe.grade+' '+s.pipe.weight;break}
    }
   }
   const weight=parts.reduce((s,x)=>s+(x.end-x.start)*x.pipe.weight,0);
