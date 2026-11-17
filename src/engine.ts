@@ -87,6 +87,26 @@ export function calculate(p:Params,pipes:Pipe[]):Result & {iterations:Iteration[
   return {...part,weight:(part.end-part.start)*part.pipe.weight,cost:part.pipe.price===null?null:(part.end-part.start)*part.pipe.price,topLoad:load,topStress:stress,minCollapseSF:rating/(gradient*part.end),minTensionSF:strength===null?NaN:strength/load};
  });
  const trace:Trace[]=segments.map(s=>({depth:s.end,grade:s.pipe.grade,weight:s.pipe.weight,load:s.topLoad,stress:s.topStress,rating:interpolate(s.pipe.table,(s.topLoad-s.weight)/s.pipe.area)!,required:gradient*s.end*p.collapseDF,factor:s.minCollapseSF,status:'PASS (collapse)'}));
+ // Educational rejected trials: evaluate burst-failing lighter candidates above the
+ // collapse-feasible accepted string, without ever marking them accepted.
+ for(const trial of all.filter(x=>x.burst<burstRequired&&x.table.length>=2&&x.collapse<parts[0].pipe.collapse)){
+  const upper=parts[0],fixedBelow=parts.slice(1).reduce((sum,x)=>sum+(x.end-x.start)*x.pipe.weight,0);
+  let h=Math.min(upper.end,trial.collapse/(p.collapseDF*gradient));
+  const label=[trial,...parts.map(x=>x.pipe)].map(x=>x.grade+' '+x.weight).join(' → ');
+  const rows:Iteration[]=[];let reason='Burst FAIL: '+trial.burst+' psi < '+burstRequired.toFixed(0)+' psi';
+  for(let i=0;i<100;i++){
+   const weightBelow=fixedBelow+(upper.end-h)*upper.pipe.weight;
+   const stress=weightBelow/trial.area;
+   const rating=interpolate(trial.table,stress);
+   if(rating===null){reason+='; collapse table does not cover axial stress';break}
+   const newDepth=Math.max(0,Math.min(upper.end,rating/(p.collapseDF*gradient)));
+   rows.push({candidate:label,iteration:i+1,assumed:h,weightBelow,stress,correctedCollapse:rating,newDepth});
+   if(Math.abs(newDepth-h)<=tol){h=newDepth;break}
+   h=newDepth;
+  }
+  iterations.push(...rows);
+  trials.push({label,accepted:false,reason,transitions:h>0&&h<upper.end?[h,...parts.slice(0,-1).map(x=>x.end)]:[],iterations:rows});
+ }
  const missing=segments.filter(s=>!Number.isFinite(s.minTensionSF));
  const failed=segments.filter(s=>Number.isFinite(s.minTensionSF)&&s.minTensionSF<p.tensionDF);
  if(missing.length)warnings.push('Collapse design calculated; tension NOT VERIFIED: missing body/joint strength for '+missing.map(s=>s.pipe.grade+' '+s.pipe.weight).join(', '));
