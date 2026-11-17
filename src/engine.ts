@@ -14,25 +14,82 @@ export const initialPipes:Pipe[]=[
 ];
 export function interpolate(points:Point[],stress:number):number|null{const a=[...points].filter(p=>Number.isFinite(p.stress)&&Number.isFinite(p.collapse)&&p.collapse>0).sort((x,y)=>x.stress-y.stress);if(a.length<2||stress<a[0].stress-1e-8||stress>a[a.length-1].stress+1e-8)return null;for(let i=1;i<a.length;i++){if(stress<=a[i].stress){const x=a[i-1],y=a[i];if(y.stress===x.stress)return null;return x.collapse+(stress-x.stress)*(y.collapse-x.collapse)/(y.stress-x.stress)}}return a[a.length-1].collapse}
 export function validate(p:Params,pipes:Pipe[]):string[]{const e:string[]=[];for(const k of ['depth','od','mud','pore','burstDF','collapseDF','tensionDF','tolerance','step'] as (keyof Params)[])if(!Number.isFinite(p[k])||p[k]<=0)e.push(`${k} must be positive`);if(p.burstDF<1||p.collapseDF<1||p.tensionDF<1)e.push('Design factors must be at least 1');if(p.step>p.depth)e.push('Grid step cannot exceed well depth');for(const x of pipes.filter(x=>x.enabled&&x.od===p.od)){if(!x.grade.trim()||[x.od,x.weight,x.area,x.burst,x.collapse].some(v=>!Number.isFinite(v)||v<=0))e.push(`${x.id}: invalid casing specifications`);if(x.table.length<2||x.table.some(q=>!Number.isFinite(q.stress)||!Number.isFinite(q.collapse)||q.collapse<=0))e.push(`${x.id}: invalid axial-collapse table`);if(x.body!==null&&x.body<=0||x.joint!==null&&x.joint<=0)e.push(`${x.id}: invalid tensile strength`)}return e}
-// Search over user-selectable depth increments. Beam pruning bounds runtime; result is best found, not certified global optimum.
-export function calculate(p:Params,pipes:Pipe[]):Result{const errors=validate(p,pipes),burstRequired=p.pore*p.burstDF,bottomCollapse=.052*p.mud*p.depth*p.collapseDF;
-const rejected:string[]=[],warnings:string[]=[];const all=pipes.filter(x=>x.enabled&&Math.abs(x.od-p.od)<.00001);
-for(const x of all){const why:string[]=[];if(x.burst<burstRequired)why.push(`burst ${x.burst.toFixed(0)} < ${burstRequired.toFixed(0)} psi`);if(x.body===null||x.joint===null)why.push('missing body/joint strength');if(x.table.length<2)why.push('missing axial-collapse table');if(why.length)rejected.push(`${x.grade} ${x.weight} lb/ft: ${why.join('; ')}`)}
-const empty=(status:'none'|'incomplete'):Result=>({status,segments:[],totalWeight:0,totalCost:null,burstRequired,bottomCollapse,rejected,trace:[],warnings:[...errors,...warnings],method:'Discrete depth grid + bounded beam search (approximate optimum)'});
-if(errors.length)return empty('incomplete');const eligible=all.filter(x=>x.burst>=burstRequired&&x.body!==null&&x.joint!==null&&x.table.length>=2);
-if(!eligible.length){warnings.push('No fully specified burst-qualified casing options. Enter missing pipe-body and joint strengths.');return empty('incomplete')}
-const priced=eligible.every(x=>x.price!==null&&Number.isFinite(x.price)&&x.price>=0);if(!priced)warnings.push('Not all eligible casing prices supplied; optimizing total casing weight as a cost proxy.');
-const levels=[0];for(let d=p.step;d<p.depth;d+=p.step)levels.push(d);levels.push(p.depth);
-type State={load:number;cost:number;parts:{pipe:Pipe;start:number;end:number}[];minSF:number};let beam:State[]=[{load:0,cost:0,parts:[],minSF:Infinity}];let lastTrace:Trace[]=[];
-// Build from bottom to surface; each step checks load at upper end of interval, where tension/axial stress is highest.
-for(let j=levels.length-1;j>0;j--){const top=levels[j-1],bottom=levels[j],len=bottom-top,next:State[]=[];
-for(const s of beam)for(const x of eligible){const load=s.load+x.weight*len,stress=load/x.area,rating=interpolate(x.table,stress),required=.052*p.mud*bottom*p.collapseDF;const strength=Math.min(x.body!,x.joint!);if(rating===null||rating+1e-8<required||strength+1e-8<load*p.tensionDF)continue;
-const parts=s.parts.length&&s.parts[s.parts.length-1].pipe.id===x.id?[...s.parts.slice(0,-1),{pipe:x,start:top,end:s.parts[s.parts.length-1].end}]:[...s.parts,{pipe:x,start:top,end:bottom}];next.push({load,cost:s.cost+len*(priced?x.price!:x.weight),parts,minSF:Math.min(s.minSF,rating/(.052*p.mud*bottom))})}
-if(!next.length){warnings.push(`No safe complete design on the ${p.step} ft grid. First infeasible interval: ${top}–${bottom} ft. Check missing data and permitted stress ranges.`);return empty('none')}
-// Keep diversity in cumulative loads and last casing; avoids greedily losing feasible upper sections.
-const bins=new Map<string,State>();for(const s of next){const key=`${s.parts[s.parts.length-1].pipe.id}:${Math.round(s.load/Math.max(1000,p.step*50))}`;const prev=bins.get(key);if(!prev||s.cost<prev.cost)bins.set(key,s)}beam=[...bins.values()].sort((a,b)=>a.cost-b.cost).slice(0,300);
+// Collapse-first iterative sizing across enabled grades and weights.
+// Tension is reported separately and never suppresses the collapse solution.
+export type Iteration={candidate:string;iteration:number;assumed:number;weightBelow:number;stress:number;correctedCollapse:number;newDepth:number};
+export type Trial={label:string;accepted:boolean;reason:string;transitions:number[];iterations:Iteration[]};
+export function calculate(p:Params,pipes:Pipe[]):Result & {iterations:Iteration[];trials:Trial[]} {
+ const errors=validate(p,pipes),burstRequired=p.pore*p.burstDF,bottomCollapse=.052*p.mud*p.depth*p.collapseDF;
+ const warnings:string[]=[],rejected:string[]=[],iterations:Iteration[]=[],trials:Trial[]=[];
+ const all=pipes.filter(x=>x.enabled&&Math.abs(x.od-p.od)<.00001);
+ const empty=(status:'none'|'incomplete')=>({status,segments:[],totalWeight:0,totalCost:null,burstRequired,bottomCollapse,rejected,trace:[],warnings:[...errors,...warnings],method:'Iterative axial-stress corrected collapse transitions; tension checked separately',iterations,trials} as Result & {iterations:Iteration[];trials:Trial[]});
+ if(errors.length)return empty('incomplete');
+ const qualified=all.filter(x=>{if(x.burst<burstRequired){rejected.push(x.grade+' '+x.weight+' lb/ft: burst '+x.burst+' < '+burstRequired+' psi');return false}if(x.table.length<2){rejected.push(x.grade+' '+x.weight+' lb/ft: missing collapse correction table');return false}return true});
+ if(!qualified.length){warnings.push('No burst-qualified casing with collapse correction data.');return empty('none')}
+ const gradient=.052*p.mud, tol=p.tolerance;
+ const sequences:Pipe[][]=[];
+ // Enumerate distinct casing choices, allowing mixed grades and multiple weights.
+ for(const a of qualified)sequences.push([a]);
+ for(const a of qualified)for(const b of qualified)if(a.id!==b.id&&a.collapse<b.collapse)sequences.push([a,b]);
+ for(const a of qualified)for(const b of qualified)for(const c of qualified)if(a.id!==b.id&&b.id!==c.id&&a.collapse<b.collapse&&b.collapse<c.collapse)sequences.push([a,b,c]);
+ let best:{parts:{pipe:Pipe;start:number;end:number}[];weight:number;cost:number|null;iterations:Iteration[]}|null=null;
+ const allPriced=qualified.every(x=>x.price!==null&&Number.isFinite(x.price)&&x.price>=0);
+ if(!allPriced)warnings.push('Prices incomplete: minimizing total casing weight as a proxy.');
+ for(const seq of sequences){
+  const label=seq.map(x=>x.grade+' '+x.weight).join(' → '),it:Iteration[]=[];
+  let parts:{pipe:Pipe;start:number;end:number}[]=[{pipe:seq[seq.length-1],start:0,end:p.depth}];
+  let reason='';
+  // Build from bottom to top, inserting each lighter option after finding its collapse transition.
+  for(let k=seq.length-2;k>=0;k--){
+   const upper=seq[k];
+   const lower=parts[0];
+   const belowFixed=parts.slice(1).reduce((s,x)=>s+(x.end-x.start)*x.pipe.weight,0);
+   let h=Math.min(lower.end,Math.max(0,upper.collapse/(p.collapseDF*gradient)));
+   let converged=false;
+   for(let i=0;i<100;i++){
+    const weightBelow=belowFixed+(lower.end-h)*lower.pipe.weight;
+    const stress=weightBelow/upper.area;
+    const rating=interpolate(upper.table,stress);
+    if(rating===null){reason='Axial stress outside supplied collapse table for '+upper.grade+' '+upper.weight;break}
+    const newDepth=Math.max(0,Math.min(lower.end,rating/(p.collapseDF*gradient)));
+    it.push({candidate:label,iteration:i+1,assumed:h,weightBelow,stress,correctedCollapse:rating,newDepth});
+    if(Math.abs(newDepth-h)<=tol){h=newDepth;converged=true;break}
+    h=newDepth;
+   }
+   if(reason)break;
+   if(!converged){reason='Collapse iteration did not converge';break}
+   if(h<=0||h>=lower.end-1e-6){reason='No positive interval for '+upper.grade+' '+upper.weight;break}
+   parts=[{pipe:upper,start:0,end:h},{...lower,start:h},...parts.slice(1)];
+  }
+  if(!reason){
+   for(let j=0;j<parts.length;j++){
+    const s=parts[j];
+    const below=parts.slice(j+1).reduce((sum,x)=>sum+(x.end-x.start)*x.pipe.weight,0);
+    const load=below+(s.end-s.start)*s.pipe.weight;
+    const rating=interpolate(s.pipe.table,load/s.pipe.area);
+    if(rating===null||rating+1e-7<gradient*s.end*p.collapseDF){reason='Collapse check failed at '+s.end.toFixed(1)+' ft for '+s.pipe.grade+' '+s.pipe.weight;break}
+   }
+  }
+  const weight=parts.reduce((s,x)=>s+(x.end-x.start)*x.pipe.weight,0);
+  const cost=allPriced?parts.reduce((s,x)=>s+(x.end-x.start)*(x.pipe.price||0),0):null;
+  trials.push({label,accepted:!reason,reason:reason||'Collapse and burst pass; tension checked separately',transitions:parts.slice(0,-1).map(x=>x.end),iterations:it});
+  iterations.push(...it);
+  if(!reason&&(!best||(allPriced?cost!<best.cost!:weight<best.weight)))best={parts,weight,cost,iterations:it};
+ }
+ if(!best){warnings.push('No collapse-feasible arrangement found using entered grades, weights and correction tables.');return empty('none')}
+ const parts=best.parts;
+ const segments:Segment[]=parts.map((part,j)=>{
+  const below=parts.slice(j+1).reduce((s,x)=>s+(x.end-x.start)*x.pipe.weight,0);
+  const load=below+(part.end-part.start)*part.pipe.weight,stress=load/part.pipe.area;
+  const rating=interpolate(part.pipe.table,stress)!;
+  const strength=part.pipe.body!==null&&part.pipe.joint!==null?Math.min(part.pipe.body,part.pipe.joint):null;
+  return {...part,weight:(part.end-part.start)*part.pipe.weight,cost:part.pipe.price===null?null:(part.end-part.start)*part.pipe.price,topLoad:load,topStress:stress,minCollapseSF:rating/(gradient*part.end),minTensionSF:strength===null?NaN:strength/load};
+ });
+ const trace:Trace[]=segments.map(s=>({depth:s.end,grade:s.pipe.grade,weight:s.pipe.weight,load:s.topLoad,stress:s.topStress,rating:interpolate(s.pipe.table,s.topStress)!,required:gradient*s.end*p.collapseDF,factor:s.minCollapseSF,status:'PASS (collapse)'}));
+ const missing=segments.filter(s=>!Number.isFinite(s.minTensionSF));
+ const failed=segments.filter(s=>Number.isFinite(s.minTensionSF)&&s.minTensionSF<p.tensionDF);
+ if(missing.length)warnings.push('Collapse design calculated; tension NOT VERIFIED: missing body/joint strength for '+missing.map(s=>s.pipe.grade+' '+s.pipe.weight).join(', '));
+ if(failed.length)warnings.push('Tension FAIL for '+failed.map(s=>s.pipe.grade+' '+s.pipe.weight).join(', '));
+ if(!missing.length&&!failed.length)warnings.push('Tension check passed for entered strengths.');
+ return {status:missing.length||failed.length?'incomplete':'safe',segments,totalWeight:best.weight,totalCost:best.cost,burstRequired,bottomCollapse,rejected,trace,method:'Iterative collapse transition sizing across grades/weights; tension verification separate; selected '+(allPriced?'lowest entered cost':'lowest total weight')+' among enumerated candidates',warnings,iterations,trials};
 }
-const best=beam.sort((a,b)=>a.cost-b.cost)[0];if(!best)return empty('none');const parts=[...best.parts].reverse();const segments:Segment[]=parts.map(part=>{let load=parts.filter(t=>t.start>=part.end).reduce((sum,t)=>sum+(t.end-t.start)*t.pipe.weight,0)+(part.end-part.start)*part.pipe.weight;const stress=load/part.pipe.area;const r=interpolate(part.pipe.table,stress)!;return {...part,weight:(part.end-part.start)*part.pipe.weight,cost:part.pipe.price===null?null:(part.end-part.start)*part.pipe.price,topLoad:load,topStress:stress,minCollapseSF:r/(.052*p.mud*part.end),minTensionSF:Math.min(part.pipe.body!,part.pipe.joint!)/load}});
-// Detailed row at every depth grid boundary; records upper-end axial load and bottom-end hydrostatic demand.
-let cumulative=0;const trace:Trace[]=[];for(let j=parts.length-1;j>=0;j--){const seg=parts[j];for(let d=seg.end;d>seg.start;d-=p.step){const upper=Math.max(seg.start,d-p.step),load=cumulative+(d-upper)*seg.pipe.weight,stress=load/seg.pipe.area,rating=interpolate(seg.pipe.table,stress),required=.052*p.mud*d*p.collapseDF;trace.push({depth:d,grade:seg.pipe.grade,weight:seg.pipe.weight,load,stress,rating:rating??NaN,required,factor:rating===null?NaN:rating/(.052*p.mud*d),status:rating!==null&&rating>=required&&Math.min(seg.pipe.body!,seg.pipe.joint!)>=load*p.tensionDF?'PASS':'FAIL'});cumulative=load}}
-return {status:'safe',segments,totalWeight:best.load,totalCost:priced?best.cost:null,burstRequired,bottomCollapse,rejected,trace,method:`Approximate minimum ${priced?'entered price':'weight'} on ${p.step} ft depth grid (beam search, max 300 states per level); not proof of global optimum`,warnings};}
