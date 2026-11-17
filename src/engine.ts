@@ -26,7 +26,7 @@ export function calculate(p:Params,pipes:Pipe[]):Result & {iterations:Iteration[
  if(errors.length)return empty('incomplete');
  const qualified=all.filter(x=>{if(x.burst<burstRequired){rejected.push(x.grade+' '+x.weight+' lb/ft: burst '+x.burst+' < '+burstRequired+' psi');return false}if(x.table.length<2){rejected.push(x.grade+' '+x.weight+' lb/ft: missing collapse correction table');return false}return true});
  if(!qualified.length){warnings.push('No burst-qualified casing with collapse correction data.');return empty('none')}
- const gradient=.052*p.mud, tol=p.tolerance;
+ const gradient=.052*p.mud, tol=Math.min(p.tolerance,0.01);
  const sequences:Pipe[][]=[];
  // Enumerate distinct casing choices, allowing mixed grades and multiple weights.
  for(const a of qualified)sequences.push([a]);
@@ -58,6 +58,9 @@ export function calculate(p:Params,pipes:Pipe[]):Result & {iterations:Iteration[
    }
    if(reason)break;
    if(!converged){reason='Collapse iteration did not converge';break}
+   // Round transition UP conservatively: deeper start of heavier pipe makes the lighter interval longer.
+   // Instead round DOWN, ensuring the lighter section ends before its limiting collapse depth.
+   h=Math.floor((h-0.000001)*100)/100;
    if(h<=0||h>=lower.end-1e-6){reason='No positive interval for '+upper.grade+' '+upper.weight;break}
    parts=[{pipe:upper,start:0,end:h},{...lower,start:h},...parts.slice(1)];
   }
@@ -70,7 +73,7 @@ export function calculate(p:Params,pipes:Pipe[]):Result & {iterations:Iteration[
     // Do not reject a section for top-of-section stress outside the collapse table:
     // its shallow collapse demand is lower and requires a separate combined-load study.
     const ratingBottom=interpolate(s.pipe.table,below/s.pipe.area);
-    if(ratingBottom===null||ratingBottom+gradient*p.collapseDF*tol+1e-7<gradient*s.end*p.collapseDF){reason='Collapse check failed at '+s.end.toFixed(1)+' ft for '+s.pipe.grade+' '+s.pipe.weight;break}
+    if(ratingBottom===null||ratingBottom+1e-7<gradient*s.end*p.collapseDF){reason='Collapse check failed at '+s.end.toFixed(1)+' ft for '+s.pipe.grade+' '+s.pipe.weight;break}
    }
   }
   const weight=parts.reduce((s,x)=>s+(x.end-x.start)*x.pipe.weight,0);
