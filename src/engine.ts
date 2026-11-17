@@ -65,10 +65,12 @@ export function calculate(p:Params,pipes:Pipe[]):Result & {iterations:Iteration[
    for(let j=0;j<parts.length;j++){
     const s=parts[j];
     const below=parts.slice(j+1).reduce((sum,x)=>sum+(x.end-x.start)*x.pipe.weight,0);
-    const load=below+(s.end-s.start)*s.pipe.weight;
-    const ratingTop=interpolate(s.pipe.table,load/s.pipe.area);
+    // Collapse demand increases with depth while tensile load decreases downward.
+    // Check the deepest point of each section using the hanging weight BELOW that point.
+    // Do not reject a section for top-of-section stress outside the collapse table:
+    // its shallow collapse demand is lower and requires a separate combined-load study.
     const ratingBottom=interpolate(s.pipe.table,below/s.pipe.area);
-    if(ratingTop===null||ratingBottom===null||ratingTop+gradient*p.collapseDF*tol+1e-7<gradient*s.start*p.collapseDF||ratingBottom+gradient*p.collapseDF*tol+1e-7<gradient*s.end*p.collapseDF){reason='Collapse check failed at '+s.end.toFixed(1)+' ft for '+s.pipe.grade+' '+s.pipe.weight;break}
+    if(ratingBottom===null||ratingBottom+gradient*p.collapseDF*tol+1e-7<gradient*s.end*p.collapseDF){reason='Collapse check failed at '+s.end.toFixed(1)+' ft for '+s.pipe.grade+' '+s.pipe.weight;break}
    }
   }
   const weight=parts.reduce((s,x)=>s+(x.end-x.start)*x.pipe.weight,0);
@@ -86,7 +88,7 @@ export function calculate(p:Params,pipes:Pipe[]):Result & {iterations:Iteration[
   const strength=part.pipe.body!==null&&part.pipe.joint!==null?Math.min(part.pipe.body,part.pipe.joint):null;
   return {...part,weight:(part.end-part.start)*part.pipe.weight,cost:part.pipe.price===null?null:(part.end-part.start)*part.pipe.price,topLoad:load,topStress:stress,minCollapseSF:rating/(gradient*part.end),minTensionSF:strength===null?NaN:strength/load};
  });
- const trace:Trace[]=segments.map(s=>({depth:s.end,grade:s.pipe.grade,weight:s.pipe.weight,load:s.topLoad,stress:s.topStress,rating:interpolate(s.pipe.table,(s.topLoad-s.weight)/s.pipe.area)!,required:gradient*s.end*p.collapseDF,factor:s.minCollapseSF,status:'PASS (collapse)'}));
+ const trace:Trace[]=segments.map((s,j)=>{const below=segments.slice(j+1).reduce((sum,x)=>sum+x.weight,0);return {depth:s.end,grade:s.pipe.grade,weight:s.pipe.weight,load:below,stress:below/s.pipe.area,rating:interpolate(s.pipe.table,below/s.pipe.area)!,required:gradient*s.end*p.collapseDF,factor:s.minCollapseSF,status:'PASS (collapse at section bottom)'}});
  // Educational rejected trials: evaluate burst-failing lighter candidates above the
  // collapse-feasible accepted string, without ever marking them accepted.
  for(const trial of all.filter(x=>x.burst<burstRequired&&x.table.length>=2&&x.collapse<parts[0].pipe.collapse)){
